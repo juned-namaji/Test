@@ -1,0 +1,35 @@
+name: Deploy to Vercel
+
+on:
+  push:
+    branches:
+      - main # Trigger deployment on push to the main branch
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Step 1: Checkout the repository code
+      - name: Checkout code
+        uses: actions/checkout@v3 # Use the latest version
+
+      # Step 2: Set up Python environment
+      - name: Set up Python 3.9
+        uses: actions/setup-python@v3 # Use the latest version
+        with:
+          python-version: "3.9"
+
+      # Step 3: Install Vercel CLI
+      - name: Install Vercel CLI
+        run: npm install -g vercel # Install the Vercel CLI globally
+
+      # Step 4: Debug Vercel Token (optional)
+      - name: Debug Vercel Token
+        run: echo "VERCEL token is set."
+        env:
+          VERCEL: ${{ secrets.VERCEL}}
+
+      # Step 5: Deploy to Vercel
+      - name: Deploy to Vercel
+        run: vercel --prod --token ${{ secrets.VERCEL }} # Pass the token explicitly

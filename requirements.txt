@@ -1,0 +1,8 @@
+langchain
+langchain_community
+langchain_pinecone
+pinecone
+pinecone-client
+fastapi
+uvicorn
+
