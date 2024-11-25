@@ -6,7 +6,6 @@ import pinecone
 from langchain.vectorstores import Pinecone as LangChainPinecone
 from langchain_pinecone import PineconeEmbeddings
 from ctransformers import AutoModelForCausalLM
-import json
 from fastapi.responses import JSONResponse
 from pinecone import Pinecone, ServerlessSpec
 
@@ -55,6 +54,15 @@ def initialize_llm():
         return None
 
 
+llm = initialize_llm()
+embeddings = initialize_pinecone()
+index = pinecone.Index(
+    index_name=INDEX_NAME,
+    host="https://pinecone-azpdmbh.svc.aped-4627-b74a.pinecone.io",
+    api_key="1f5403e4-2faa-481a-814d-19b3204261a8",
+)
+
+
 # Format context for the response
 def format_context(chunks: List[dict]) -> str:
     context = ""
@@ -98,16 +106,6 @@ def chatbot_query(query: str, index, embeddings, llm) -> str:
         return response
     except Exception as e:
         return f"An error occurred while processing your query: {str(e)}"
-
-
-# Initialize model and embeddings
-llm = initialize_llm()
-embeddings = initialize_pinecone()
-index = pinecone.Index(
-    index_name=INDEX_NAME,
-    host="https://pinecone-azpdmbh.svc.aped-4627-b74a.pinecone.io",
-    api_key="1f5403e4-2faa-481a-814d-19b3204261a8",
-)
 
 
 # FastAPI GET Endpoint to handle chatbot queries
