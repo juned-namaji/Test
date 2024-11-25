@@ -1,58 +1,40 @@
-from fastapi import FastAPI, HTTPException, Request
-from pydantic import BaseModel
-import requests
+from fastapi import FastAPI, HTTPException
 import os
-import json
+import time
 from typing import List
+import pinecone
 from langchain.vectorstores import Pinecone as LangChainPinecone
 from langchain_pinecone import PineconeEmbeddings
-from pinecone import Pinecone, ServerlessSpec
-import pinecone
 from ctransformers import AutoModelForCausalLM
-from dotenv import load_dotenv
+import json
+from fastapi.responses import JSONResponse
 
-# Load environment variables
-load_dotenv()
+# Configuration
+PINECONE_API_KEY = "624cd15e-b2fc-4e1b-99f4-71e0edb92447"
+PINECONE_API_ENV = "us-east-1"
+INDEX_NAME = "pinecone"
 
-# Configuration from .env
-PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
-PINECONE_API_ENV = os.getenv("PINECONE_API_ENV")
-INDEX_NAME = os.getenv("INDEX_NAME")
-PINECONE_HOST = os.getenv("PINECONE_HOST")
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-
-# Telegram Webhook URL (should point to your deployed endpoint)
-WEBHOOK_URL = f"https://<your-vercel-deployment>/telegram_webhook"
+# Initialize FastAPI app
+app = FastAPI()
 
 # Set up Pinecone
 os.environ["PINECONE_API_KEY"] = PINECONE_API_KEY
-os.environ["PINECONE_API_ENV"] = PINECONE_API_ENV
-
-app = FastAPI()
-
-# Telegram API URL
-TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
+pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY"))
 
 
-class QueryRequest(BaseModel):
-    query: str
-
-
-# Global variables for embeddings, LLM, and Pinecone index
-embeddings = None
-llm = None
-index = None
-
-
-# Pinecone Initialization
+# Initialize Pinecone embeddings
 def initialize_pinecone():
-    pinecone.init(api_key=PINECONE_API_KEY, environment=PINECONE_API_ENV)
-    if INDEX_NAME not in pinecone.list_indexes():
-        pinecone.create_index(name=INDEX_NAME, dimension=1024, metric="euclidean")
+    if INDEX_NAME not in pc.list_indexes().names():
+        pc.create_index(
+            name=INDEX_NAME,
+            dimension=1024,
+            metric="euclidean",
+            spec=ServerlessSpec(cloud="aws", region=PINECONE_API_ENV),
+        )
     return PineconeEmbeddings(model="multilingual-e5-large")
 
 
-# Initialize Llama Model
+# Initialize Llama model
 def initialize_llm():
     """Initialize the Llama 2 model using ctransformers."""
     try:
@@ -72,8 +54,8 @@ def initialize_llm():
         return None
 
 
+# Format context for the response
 def format_context(chunks: List[dict]) -> str:
-    """Format retrieved chunks into a context string."""
     context = ""
     for chunk in chunks[:3]:  # Using top 3 most relevant chunks
         if "metadata" in chunk and "text" in chunk["metadata"]:
@@ -81,8 +63,8 @@ def format_context(chunks: List[dict]) -> str:
     return context.strip()
 
 
+# Generate response using Llama 2
 def generate_llama2_response(llm, query: str, context: str) -> str:
-    """Generate response using Llama 2 based on query and context."""
     try:
         prompt_template = """<s>[INST] You are a helpful spiritual assistant. Use the provided context to answer questions accurately and concisely.
         If you can't find the answer in the context, say so honestly.
@@ -92,91 +74,62 @@ def generate_llama2_response(llm, query: str, context: str) -> str:
         Answer: [/INST]"""
 
         full_prompt = prompt_template.format(context=context, query=query)
+        print("Sending to LLM")
         response = llm(full_prompt, max_new_tokens=512)
         return response.strip()
     except Exception as e:
         return f"Error generating response: {str(e)}"
 
 
-@app.on_event("startup")
-def startup_event():
-    global embeddings, llm, index
-    embeddings = initialize_pinecone()
-    llm = initialize_llm()
-    index = pinecone.Index(
-        index_name=INDEX_NAME, api_key=PINECONE_API_KEY, host=PINECONE_HOST
-    )
-    set_webhook()
+# Main function to process the query and generate a response
+def chatbot_query(query: str, index, embeddings, llm) -> str:
+    try:
+        query_embedding = embeddings.embed_query(query)
+        results = index.query(
+            vector=query_embedding, top_k=3, include_values=False, include_metadata=True
+        )
+        chunks = results.get("matches", [])
+        if not chunks:
+            return "I couldn't find any relevant information to answer your question."
+        context = format_context(chunks)
+        print(context)
+        response = generate_llama2_response(llm, query, context)
+        return response
+    except Exception as e:
+        return f"An error occurred while processing your query: {str(e)}"
 
 
+# Initialize model and embeddings
+llm = initialize_llm()
+embeddings = initialize_pinecone()
+index = pinecone.Index(
+    index_name=INDEX_NAME,
+    host="https://pinecone-azpdmbh.svc.aped-4627-b74a.pinecone.io",
+    api_key="1f5403e4-2faa-481a-814d-19b3204261a8",
+)
+
+
+# FastAPI GET Endpoint to handle chatbot queries
 @app.get("/query")
 async def chatbot_query_endpoint(query: str):
-    """
-    This endpoint handles GET requests for querying the chatbot.
-    The query parameter is passed in the URL like: /query?query=<your-query>
-    """
+    """GET endpoint to process the query."""
     try:
-        global embeddings, llm, index
+        if not query:
+            raise HTTPException(status_code=400, detail="Query parameter is required.")
 
-        query_embedding = embeddings.embed_query(query)
-        results = index.query(
-            vector=query_embedding, top_k=3, include_values=False, include_metadata=True
+        print(f"\nProcessing query: {query}")
+        start_time = time.time()
+
+        # Process the query using the chatbot logic
+        response = chatbot_query(query, index, embeddings, llm)
+
+        # Calculate the time taken to process the query
+        end_time = time.time()
+        time_taken = end_time - start_time
+
+        return JSONResponse(
+            content={"response": response, "time_taken": f"{time_taken:.2f} seconds"}
         )
-        chunks = results.get("matches", [])
-
-        if not chunks:
-            return {
-                "response": "I couldn't find any relevant information to answer your question."
-            }
-
-        context = format_context(chunks)
-        response = generate_llama2_response(llm, query, context)
-        return {"response": response}
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
-
-
-@app.post("/telegram_webhook")
-async def telegram_webhook(request: Request):
-    try:
-        global embeddings, llm, index
-
-        # Parse the incoming Telegram update
-        update = await request.json()
-        message = update.get("message", {})
-        chat_id = message.get("chat", {}).get("id")
-        query = message.get("text")
-
-        if not query or not chat_id:
-            return {"status": "ignored"}
-
-        # Process the query
-        query_embedding = embeddings.embed_query(query)
-        results = index.query(
-            vector=query_embedding, top_k=3, include_values=False, include_metadata=True
-        )
-        chunks = results.get("matches", [])
-        context = format_context(chunks) if chunks else ""
-        response = generate_llama2_response(llm, query, context)
-
-        # Send the response back to the user
-        send_telegram_message(chat_id, response)
-        return {"status": "success"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
-
-
-def send_telegram_message(chat_id: int, text: str):
-    """Send a message to a Telegram chat."""
-    url = f"{TELEGRAM_API_URL}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text}
-    requests.post(url, json=payload)
-
-
-def set_webhook():
-    """Set the Telegram webhook."""
-    url = f"{TELEGRAM_API_URL}/setWebhook"
-    payload = {"url": WEBHOOK_URL}
-    response = requests.post(url, json=payload)
-    print("Webhook set:", response.json())
