@@ -25,6 +25,12 @@ client = None
 app = FastAPI()
 
 
+# Root path
+@app.get("/")
+async def root():
+    return {"message": "Hello, World!"}
+
+
 # Pydantic model for query
 class QueryRequest(BaseModel):
     query: str
