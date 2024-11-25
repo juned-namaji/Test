@@ -105,21 +105,39 @@ def startup_event():
 
 @app.get("/query")
 async def chatbot_query_endpoint(query: str):
+    """
+    This endpoint handles GET requests for querying the chatbot.
+    The query parameter is passed in the URL like: /query?query=<your-query>
+    """
     try:
-        # Use the query parameter directly from the URL
+        # query is automatically extracted from the URL parameter
         query_embedding = embeddings.embed_query(query)
+
+        # Query Pinecone index with the embedded query
         results = index.query(
             vector=query_embedding, top_k=3, include_values=False, include_metadata=True
         )
+
+        # Extract the matches from Pinecone results
         chunks = results.get("matches", [])
+
+        # If no matches are found, return a message saying so
         if not chunks:
             return {
                 "response": "I couldn't find any relevant information to answer your question."
             }
+
+        # Format the top 3 chunks into a context string
         context = format_context(chunks)
+
+        # Generate a response using the Llama 2 model with the context and query
         response = generate_llama2_response(llm, query, context)
+
+        # Return the response in JSON format
         return {"response": response}
+
     except Exception as e:
+        # If an error occurs, return a 500 HTTP exception with the error message
         raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
 
 
