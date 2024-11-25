@@ -1,12 +1,10 @@
 from fastapi import FastAPI, HTTPException, Request
+from contextlib import asynccontextmanager
 from pydantic import BaseModel
 import requests
 import os
-import json
-from typing import List
-from langchain.vectorstores import Pinecone as LangChainPinecone
+from typing import List, AsyncGenerator
 from langchain_pinecone import PineconeEmbeddings
-from pinecone import Pinecone, ServerlessSpec
 import pinecone
 from ctransformers import AutoModelForCausalLM
 from dotenv import load_dotenv
@@ -28,10 +26,13 @@ WEBHOOK_URL = f"https://<your-vercel-deployment>/telegram_webhook"
 os.environ["PINECONE_API_KEY"] = PINECONE_API_KEY
 os.environ["PINECONE_API_ENV"] = PINECONE_API_ENV
 
-app = FastAPI()
-
 # Telegram API URL
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
+
+# Declare global variables
+embeddings = None
+llm = None
+index = None
 
 
 class QueryRequest(BaseModel):
@@ -92,15 +93,33 @@ def generate_llama2_response(llm, query: str, context: str) -> str:
         return f"Error generating response: {str(e)}"
 
 
-@app.on_event("startup")
-def startup_event():
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    """Manage startup and shutdown events."""
+    print("Initializing application...")
     global embeddings, llm, index
-    embeddings = initialize_pinecone()
-    llm = initialize_llm()
-    index = pinecone.Index(
-        index_name=INDEX_NAME, api_key=PINECONE_API_KEY, host=PINECONE_HOST
-    )
-    set_webhook()
+    try:
+        embeddings = initialize_pinecone()
+        print("Pinecone embeddings initialized.")
+        llm = initialize_llm()
+        print("LLM initialized.")
+        index = pinecone.Index(
+            index_name=INDEX_NAME, api_key=PINECONE_API_KEY, host=PINECONE_HOST
+        )
+        print("Pinecone index connected.")
+        set_webhook()
+        print("Webhook set successfully.")
+    except Exception as e:
+        print(f"Startup initialization failed: {str(e)}")
+        raise e
+
+    yield
+
+    print("Shutting down application...")
+    # Add any necessary cleanup logic here
+
+
+app = FastAPI(lifespan=lifespan)
 
 
 @app.post("/query")
