@@ -8,6 +8,7 @@ from langchain_pinecone import PineconeEmbeddings
 from ctransformers import AutoModelForCausalLM
 import json
 from fastapi.responses import JSONResponse
+from pinecone import Pinecone, ServerlessSpec
 
 # Configuration
 PINECONE_API_KEY = "624cd15e-b2fc-4e1b-99f4-71e0edb92447"
