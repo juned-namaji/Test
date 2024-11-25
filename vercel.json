@@ -1,10 +1,11 @@
 {
-  "functions": {
-    "api/*.py": {
-      "runtime": "@vercel/python",
-      "includeFiles": "requirements.txt"
+  
+  "builds": [
+    {
+      "src": "api/*.py",
+      "use": "@vercel/python"
     }
-  },
+  ],
   "routes": [
     {
       "src": "/webhook",
@@ -14,11 +15,5 @@
       "src": "/(.*)",
       "dest": "/api/main.py"
     }
-  ],
-  "build": {
-    "commands": [
-      "pip install -r requirements.txt -t .",
-      "echo 'Build process complete!'"
-    ]
-  }
+  ]
 }
