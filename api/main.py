@@ -42,7 +42,7 @@ def initialize_llm():
         llm = AutoModelForCausalLM.from_pretrained(
             "TheBloke/Llama-2-7B-Chat-GGML",
             model_type="llama",
-            model_file="llama-2-7b-chat.ggmlv3.q4_K_M.bin",  # Ensure path is writable or hosted
+            model_file="llama-2-7b-chat.ggmlv3.q4_K_M.bin",
             max_new_tokens=512,
             temperature=0.5,
             repetition_penalty=1.15,
