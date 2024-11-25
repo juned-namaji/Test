@@ -54,8 +54,14 @@ def initialize_llm():
         return None
 
 
+# Initialize LLM and embeddings
 llm = initialize_llm()
 embeddings = initialize_pinecone()
+
+# Handle case where LLM isn't initialized
+if llm is None:
+    raise Exception("Failed to initialize LLM model")
+
 index = pinecone.Index(
     index_name=INDEX_NAME,
     host="https://pinecone-azpdmbh.svc.aped-4627-b74a.pinecone.io",
