@@ -50,7 +50,7 @@ def initialize_llm():
         )
         return llm
     except Exception as e:
-        print(f"Error initializing LLM: {str(e)}")
+        print(f"Error initializing LLM : {str(e)}")
         return None
 
 
