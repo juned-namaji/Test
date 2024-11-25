@@ -1,13 +1,17 @@
-from fastapi import FastAPI, HTTPException, Request
-from pydantic import BaseModel
-from dotenv import load_dotenv
-from langchain_pinecone import PineconeEmbeddings
-import pinecone
 import os
+from langchain_community.vectorstores import Pinecone
+from langchain_pinecone import PineconeEmbeddings
+from pinecone import Pinecone, ServerlessSpec
+import pinecone
 import httpx
+from fastapi import FastAPI, Request
+from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
+
+# FastAPI app instance
+app = FastAPI()
 
 # Configuration
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
@@ -17,103 +21,143 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 PINECONE_HOST = os.getenv("PINECONE_HOST")
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
-# Global variables
-pinecone_embeddings = None
+# Global AsyncClient
 client = None
 
-# Initialize FastAPI app
-app = FastAPI()
+# Set up Pinecone
+os.environ["PINECONE_API_KEY"] = PINECONE_API_KEY
+pc = Pinecone(api_key=PINECONE_API_KEY)
 
 
-# Root path
-@app.get("/")
-async def root():
-    return {"message": "Hello, World!"}
-
-
-# Pydantic model for query
-class QueryRequest(BaseModel):
-    query: str
-
-
-# Pinecone initialization
+# Pinecone Initialization
 def initialize_pinecone():
-    pinecone.init(api_key=PINECONE_API_KEY, environment=PINECONE_API_ENV)
-    if INDEX_NAME not in pinecone.list_indexes():
-        pinecone.create_index(name=INDEX_NAME, dimension=1024, metric="euclidean")
+    if INDEX_NAME not in pc.list_indexes().names():
+        pc.create_index(
+            name=INDEX_NAME,
+            dimension=1024,
+            metric="euclidean",
+            spec=ServerlessSpec(cloud="aws", region=PINECONE_API_ENV),
+        )
     return PineconeEmbeddings(model="multilingual-e5-large")
 
 
-# Startup and shutdown events
+# Initialize Pinecone
+pinecone_embeddings = initialize_pinecone()
+
+
+# Startup event to initialize the HTTP client
 @app.on_event("startup")
 async def startup():
-    global pinecone_embeddings, client
-    pinecone_embeddings = initialize_pinecone()
-    print("Pinecone initialized.")
-    client = httpx.AsyncClient()
+    global client
+    if client is None:  # Ensure client is initialized only once
+        client = httpx.AsyncClient()
 
 
+# Shutdown event to close the HTTP client session
 @app.on_event("shutdown")
 async def shutdown():
     global client
-    if client:
+    if client is not None:
         await client.aclose()
         client = None
 
 
-# Format context from Pinecone query results
-def format_context(chunks):
-    context = ""
-    for chunk in chunks[:3]:
-        context += f"{chunk['metadata'].get('text', '')}\n\n"
-    return context.strip()
+# Home endpoint
+@app.get("/")
+def ret():
+    return {"Hello": "World"}
 
 
-# Query Pinecone and generate response
+# Query Pinecone index directly
+@app.get("/{query}")
+async def query_pinecone(query: str):
+    embedding = pinecone_embeddings.embed_query(query)
+
+    index = pinecone.Index(
+        index_name=INDEX_NAME, host=PINECONE_HOST, api_key=PINECONE_API_KEY
+    )
+
+    results = index.query(
+        vector=embedding, top_k=7, include_values=False, include_metadata=True
+    )
+
+    top_chunks = results.get("matches", [])
+    response = []
+    for i, chunk in enumerate(top_chunks, start=1):
+        response.append(
+            {
+                "rank": i,
+                "date": chunk["metadata"].get("date", "N/A"),
+                "title": chunk["metadata"].get("title", "N/A"),
+                "text": chunk["metadata"].get("text", "N/A"),
+            }
+        )
+
+    return response
+
+
+# Telegram webhook endpoint
+@app.post("/webhook")
+async def telegram_webhook(request: Request):
+    try:
+        data = await request.json()
+        print(f"Incoming Telegram data: {data}")  # Debugging log
+        message = data.get("message", {})
+        chat_id = message.get("chat", {}).get("id")
+        text = message.get("text", "")
+
+        if chat_id and text:
+            response_text = await process_query(text)
+            await send_message(chat_id, response_text)
+
+        return {"status": "ok"}
+    except Exception as e:
+        print(f"Error in webhook: {str(e)}")
+        return {"status": "error", "details": str(e)}
+
+
+# Process the query using Pinecone
 async def process_query(query: str) -> str:
     try:
         embedding = pinecone_embeddings.embed_query(query)
+
         index = pinecone.Index(
             index_name=INDEX_NAME, host=PINECONE_HOST, api_key=PINECONE_API_KEY
         )
-        results = index.query(vector=embedding, top_k=3, include_metadata=True)
-        chunks = results.get("matches", [])
-        if not chunks:
+
+        results = index.query(
+            vector=embedding, top_k=7, include_values=False, include_metadata=True
+        )
+
+        top_chunks = results.get("matches", [])
+        if not top_chunks:
             return "No relevant information found."
-        context = format_context(chunks)
-        return f"Response generated using context:\n\n{context}"
+
+        response = ""
+        for i, chunk in enumerate(top_chunks, start=1):
+            date = chunk["metadata"].get("date", "N/A")
+            title = chunk["metadata"].get("title", "N/A")
+            text = chunk["metadata"].get("text", "N/A")
+            response += f"Rank {i}:\nDate: {date}\nTitle: {title}\nText: {text}\n\n"
+
+        return response.strip()
+
     except Exception as e:
         return f"Error processing query: {str(e)}"
 
 
-# Telegram webhook endpoint
-@app.post("/telegram_webhook")
-async def telegram_webhook(request: Request):
+# Send a message to the Telegram user
+async def send_message(chat_id, text):
     global client
-    data = await request.json()
-    message = data.get("message", {})
-    chat_id = message.get("chat", {}).get("id")
-    text = message.get("text", "")
-
-    if not (chat_id and text):
-        return {"status": "ignored"}
+    if client is None:  # Reinitialize client if missing
+        client = httpx.AsyncClient()
 
     try:
-        response_text = await process_query(text)
-        await client.post(
-            f"{TELEGRAM_API_URL}/sendMessage",
-            json={"chat_id": chat_id, "text": response_text},
+        response = await client.post(
+            f"{TELEGRAM_API_URL}/sendMessage", json={"chat_id": chat_id, "text": text}
         )
-        return {"status": "success"}
+        response.raise_for_status()  # Raise an error if the request failed
+    except httpx.HTTPStatusError as e:
+        print(f"HTTP error occurred: {e.response.status_code}")
     except Exception as e:
-        return {"status": "error", "details": str(e)}
-
-
-# Query endpoint for manual testing
-@app.post("/query")
-async def query_endpoint(query: QueryRequest):
-    try:
-        response = await process_query(query.query)
-        return {"response": response}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+        print(f"An error occurred: {str(e)}")
