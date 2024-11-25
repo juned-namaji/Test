@@ -1,9 +1,9 @@
-from fastapi import FastAPI, HTTPException
 import os
 import time
+from fastapi import FastAPI, HTTPException
 from typing import List
 import pinecone
-from langchain.vectorstores import Pinecone as LangChainPinecone
+from langchain_community.vectorstores import Pinecone as LangChainPinecone
 from langchain_pinecone import PineconeEmbeddings
 from ctransformers import AutoModelForCausalLM
 from fastapi.responses import JSONResponse
@@ -34,7 +34,7 @@ def initialize_pinecone():
     return PineconeEmbeddings(model="multilingual-e5-large")
 
 
-# Initialize Llama model
+# Initialize Llama model (ensure it's compatible with your environment)
 def initialize_llm():
     """Initialize the Llama 2 model using ctransformers."""
     try:
@@ -42,7 +42,7 @@ def initialize_llm():
         llm = AutoModelForCausalLM.from_pretrained(
             "TheBloke/Llama-2-7B-Chat-GGML",
             model_type="llama",
-            model_file="llama-2-7b-chat.ggmlv3.q4_K_M.bin",
+            model_file="llama-2-7b-chat.ggmlv3.q4_K_M.bin",  # Ensure path is writable or hosted
             max_new_tokens=512,
             temperature=0.5,
             repetition_penalty=1.15,
@@ -56,12 +56,12 @@ def initialize_llm():
 
 # Initialize LLM and embeddings
 llm = initialize_llm()
-embeddings = initialize_pinecone()
-
-# Handle case where LLM isn't initialized
 if llm is None:
     raise Exception("Failed to initialize LLM model")
 
+embeddings = initialize_pinecone()
+
+# Set up Pinecone index
 index = pinecone.Index(
     index_name=INDEX_NAME,
     host="https://pinecone-azpdmbh.svc.aped-4627-b74a.pinecone.io",
