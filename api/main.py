@@ -25,6 +25,11 @@ client = None
 app = FastAPI()
 
 
+# Pydantic model for query
+class QueryRequest(BaseModel):
+    query: str
+
+
 # Pinecone initialization
 def initialize_pinecone():
     pinecone.init(api_key=PINECONE_API_KEY, environment=PINECONE_API_ENV)
@@ -100,7 +105,7 @@ async def telegram_webhook(request: Request):
 
 # Query endpoint for manual testing
 @app.post("/query")
-async def query_endpoint(query: BaseModel):
+async def query_endpoint(query: QueryRequest):
     try:
         response = await process_query(query.query)
         return {"response": response}
