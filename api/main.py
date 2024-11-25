@@ -1,45 +1,31 @@
 from fastapi import FastAPI, HTTPException, Request
-from contextlib import asynccontextmanager
 from pydantic import BaseModel
-import requests
-import os
-from typing import List, AsyncGenerator
+from dotenv import load_dotenv
 from langchain_pinecone import PineconeEmbeddings
 import pinecone
-from ctransformers import AutoModelForCausalLM
-from dotenv import load_dotenv
+import os
+import httpx
 
 # Load environment variables
 load_dotenv()
 
-# Configuration from .env
+# Configuration
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 PINECONE_API_ENV = os.getenv("PINECONE_API_ENV")
 INDEX_NAME = os.getenv("INDEX_NAME")
-PINECONE_HOST = os.getenv("PINECONE_HOST")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-
-# Telegram Webhook URL (should point to your deployed endpoint)
-WEBHOOK_URL = f"https://<your-vercel-deployment>/telegram_webhook"
-
-# Set up Pinecone
-os.environ["PINECONE_API_KEY"] = PINECONE_API_KEY
-os.environ["PINECONE_API_ENV"] = PINECONE_API_ENV
-
-# Telegram API URL
+PINECONE_HOST = os.getenv("PINECONE_HOST")
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
-# Declare global variables
-embeddings = None
-llm = None
-index = None
+# Global variables
+pinecone_embeddings = None
+client = None
+
+# Initialize FastAPI app
+app = FastAPI()
 
 
-class QueryRequest(BaseModel):
-    query: str
-
-
-# Pinecone Initialization
+# Pinecone initialization
 def initialize_pinecone():
     pinecone.init(api_key=PINECONE_API_KEY, environment=PINECONE_API_ENV)
     if INDEX_NAME not in pinecone.list_indexes():
@@ -47,139 +33,76 @@ def initialize_pinecone():
     return PineconeEmbeddings(model="multilingual-e5-large")
 
 
-# Initialize Llama Model
-def initialize_llm():
-    """Initialize the Llama 2 model using ctransformers."""
-    try:
-        print("Initializing LLM")
-        llm = AutoModelForCausalLM.from_pretrained(
-            "TheBloke/Llama-2-7B-Chat-GGML",
-            model_type="llama",
-            model_file="llama-2-7b-chat.ggmlv3.q4_K_M.bin",
-            max_new_tokens=512,
-            temperature=0.5,
-            repetition_penalty=1.15,
-            context_length=1024,
-        )
-        return llm
-    except Exception as e:
-        print(f"Error initializing LLM: {str(e)}")
-        return None
+# Startup and shutdown events
+@app.on_event("startup")
+async def startup():
+    global pinecone_embeddings, client
+    pinecone_embeddings = initialize_pinecone()
+    print("Pinecone initialized.")
+    client = httpx.AsyncClient()
 
 
-def format_context(chunks: List[dict]) -> str:
-    """Format retrieved chunks into a context string."""
+@app.on_event("shutdown")
+async def shutdown():
+    global client
+    if client:
+        await client.aclose()
+        client = None
+
+
+# Format context from Pinecone query results
+def format_context(chunks):
     context = ""
-    for chunk in chunks[:3]:  # Using top 3 most relevant chunks
-        if "metadata" in chunk and "text" in chunk["metadata"]:
-            context += f"{chunk['metadata']['text']}\n\n"
+    for chunk in chunks[:3]:
+        context += f"{chunk['metadata'].get('text', '')}\n\n"
     return context.strip()
 
 
-def generate_llama2_response(llm, query: str, context: str) -> str:
-    """Generate response using Llama 2 based on query and context."""
+# Query Pinecone and generate response
+async def process_query(query: str) -> str:
     try:
-        prompt_template = """<s>[INST] You are a helpful spiritual assistant. Use the provided context to answer questions accurately and concisely.
-        If you can't find the answer in the context, say so honestly.
-        Context:
-        {context}
-        Question: {query}
-        Answer: [/INST]"""
-
-        full_prompt = prompt_template.format(context=context, query=query)
-        response = llm(full_prompt, max_new_tokens=512)
-        return response.strip()
-    except Exception as e:
-        return f"Error generating response: {str(e)}"
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    """Manage startup and shutdown events."""
-    print("Initializing application...")
-    global embeddings, llm, index
-    try:
-        embeddings = initialize_pinecone()
-        print("Pinecone embeddings initialized.")
-        llm = initialize_llm()
-        print("LLM initialized.")
+        embedding = pinecone_embeddings.embed_query(query)
         index = pinecone.Index(
-            index_name=INDEX_NAME, api_key=PINECONE_API_KEY, host=PINECONE_HOST
+            index_name=INDEX_NAME, host=PINECONE_HOST, api_key=PINECONE_API_KEY
         )
-        print("Pinecone index connected.")
-        set_webhook()
-        print("Webhook set successfully.")
-    except Exception as e:
-        print(f"Startup initialization failed: {str(e)}")
-        raise e
-
-    yield
-
-    print("Shutting down application...")
-    # Add any necessary cleanup logic here
-
-
-app = FastAPI(lifespan=lifespan)
-
-
-@app.post("/query")
-async def chatbot_query_endpoint(request: QueryRequest):
-    query = request.query
-    try:
-        query_embedding = embeddings.embed_query(query)
-        results = index.query(
-            vector=query_embedding, top_k=3, include_values=False, include_metadata=True
-        )
+        results = index.query(vector=embedding, top_k=3, include_metadata=True)
         chunks = results.get("matches", [])
         if not chunks:
-            return {
-                "response": "I couldn't find any relevant information to answer your question."
-            }
+            return "No relevant information found."
         context = format_context(chunks)
-        response = generate_llama2_response(llm, query, context)
-        return {"response": response}
+        return f"Response generated using context:\n\n{context}"
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
+        return f"Error processing query: {str(e)}"
 
 
+# Telegram webhook endpoint
 @app.post("/telegram_webhook")
 async def telegram_webhook(request: Request):
+    global client
+    data = await request.json()
+    message = data.get("message", {})
+    chat_id = message.get("chat", {}).get("id")
+    text = message.get("text", "")
+
+    if not (chat_id and text):
+        return {"status": "ignored"}
+
     try:
-        # Parse the incoming Telegram update
-        update = await request.json()
-        message = update.get("message", {})
-        chat_id = message.get("chat", {}).get("id")
-        query = message.get("text")
-
-        if not query or not chat_id:
-            return {"status": "ignored"}
-
-        # Process the query
-        query_embedding = embeddings.embed_query(query)
-        results = index.query(
-            vector=query_embedding, top_k=3, include_values=False, include_metadata=True
+        response_text = await process_query(text)
+        await client.post(
+            f"{TELEGRAM_API_URL}/sendMessage",
+            json={"chat_id": chat_id, "text": response_text},
         )
-        chunks = results.get("matches", [])
-        context = format_context(chunks) if chunks else ""
-        response = generate_llama2_response(llm, query, context)
-
-        # Send the response back to the user
-        send_telegram_message(chat_id, response)
         return {"status": "success"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
+        return {"status": "error", "details": str(e)}
 
 
-def send_telegram_message(chat_id: int, text: str):
-    """Send a message to a Telegram chat."""
-    url = f"{TELEGRAM_API_URL}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text}
-    requests.post(url, json=payload)
-
-
-def set_webhook():
-    """Set the Telegram webhook."""
-    url = f"{TELEGRAM_API_URL}/setWebhook"
-    payload = {"url": WEBHOOK_URL}
-    response = requests.post(url, json=payload)
-    print("Webhook set:", response.json())
+# Query endpoint for manual testing
+@app.post("/query")
+async def query_endpoint(query: BaseModel):
+    try:
+        response = await process_query(query.query)
+        return {"response": response}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
